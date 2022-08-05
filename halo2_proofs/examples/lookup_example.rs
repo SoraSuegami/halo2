@@ -3,10 +3,9 @@ use std::marker::PhantomData;
 use halo2_proofs::{
     arithmetic::FieldExt,
     circuit::{AssignedCell, Chip, Layouter, Region, SimpleFloorPlanner},
-    plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Fixed, Instance, Selector, TableColumn},
+    plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Instance, TableColumn, Expression},
     poly::Rotation
 };
-use rand::thread_rng;
 
 // ANCHOR: instructions
 trait XorInstructions<F: FieldExt>: Chip<F> {
@@ -55,24 +54,14 @@ struct XorConfig<F: FieldExt, const N:usize> {
     /// For this chip, we will use two advice columns to implement our instructions.
     /// These are also the columns through which we communicate with other parts of
     /// the circuit.
-    advice: Column<Advice>,
+    advice: [Column<Advice>;2],
     instance: Column<Instance>,
-
-    input_a: Column<Advice>,
-    input_b: Column<Advice>,
-    output_c: Column<Advice>,
 
     table_a: TableColumn,
     table_b: TableColumn,
     table_c: TableColumn,
 
     _f: PhantomData<F>
-
-    // We need a selector to enable the xor gate, so that we aren't placing
-    // any constraints on cells where `NumericInstructions::xor` is not being used.
-    // This is important when building larger circuits, where columns are used by
-    // multiple sets of instructions.
-    //s_xor: Selector,
 }
 
 
@@ -88,42 +77,37 @@ impl<F: FieldExt, const N:usize> XorChip<F,N> {
 
     fn configure(
         meta: &mut ConstraintSystem<F>,
-        advice: Column<Advice>,
-        instance: Column<Instance>
+        advice: [Column<Advice>;2],
+        instance: Column<Instance>,
     ) -> <Self as Chip<F>>::Config {
-        let input_a = meta.advice_column();
-        let input_b = meta.advice_column();
-        let output_c = meta.advice_column();
-
-        meta.enable_equality(advice);
+        for column in &advice {
+            meta.enable_equality(*column);
+        }
         meta.enable_equality(instance);
-        meta.enable_equality(input_a);
-        meta.enable_equality(input_b);
-        meta.enable_equality(output_c);
 
+        let q_xor = meta.complex_selector();
         let table_a = meta.lookup_table_column();
         let table_b = meta.lookup_table_column();
         let table_c = meta.lookup_table_column();
 
         // Define our xor lookup table!
         meta.lookup("xor", |meta| {
-            let a_cur = meta.query_advice(input_a, Rotation::cur());
-            let b_cur = meta.query_advice(input_b, Rotation::cur());
-            let c_cur = meta.query_advice(output_c, Rotation::cur());
-
+            let a = meta.query_advice(advice[0], Rotation::cur());
+            let b = meta.query_advice(advice[1], Rotation::cur());
+            let c = meta.query_advice(advice[0], Rotation::next());
+            let default = Expression::Constant(F::zero());
+            let q = meta.query_selector(q_xor);
+            let not_q = Expression::Constant(F::one()) - q.clone();
             vec![
-                (a_cur, table_a),
-                (b_cur, table_b),
-                (c_cur, table_c),
+                (a*q.clone()+default.clone()*not_q.clone(), table_a),
+                (b*q.clone()+default.clone()*not_q.clone(), table_b),
+                (c*q+default*not_q, table_c),
             ]
         });
 
         XorConfig {
             advice,
             instance,
-            input_a,
-            input_b,
-            output_c,
             table_a,
             table_b,
             table_c,
@@ -192,7 +176,7 @@ impl<F: FieldExt, const N:usize> XorConfig<F, N> {
     fn generate() -> impl Iterator<Item = (F, F, F)> {
         (0..(1 << 2*N)).scan(
             (F::zero(), F::zero(), F::zero()),
-            |(a, b, c), i| {
+            |(_, _, _), i| {
                 let a_index = i & ((1<<N)-1);
                 let b_index = i >> N;
 
@@ -207,7 +191,7 @@ impl<F: FieldExt, const N:usize> XorConfig<F, N> {
 
 
 // ANCHOR: instructions-impl
-/// A variable representing a number.
+/// A variable representing a boolean vector.
 #[derive(Clone)]
 struct Bits<F: FieldExt, const N:usize>(AssignedCell<F, F>);
 
@@ -227,7 +211,7 @@ impl<F: FieldExt, const N:usize> XorInstructions<F> for XorChip<F,N> {
                 region
                     .assign_advice(
                         || "private input",
-                        config.advice,
+                        config.advice[0],
                         0,
                         || value.ok_or(Error::Synthesis),
                     )
@@ -251,10 +235,10 @@ impl<F: FieldExt, const N:usize> XorInstructions<F> for XorChip<F,N> {
                 // but we can only rely on relative offsets inside this region. So we
                 // assign new cells inside the region and constrain them to have the
                 // same values as the inputs.
-                a.0.copy_advice(|| "input_a", &mut region, config.input_a, 0)?;
-                b.0.copy_advice(|| "input_b", &mut region, config.input_b, 0)?;
+                a.0.copy_advice(|| "input_a", &mut region, config.advice[0], 0)?;
+                b.0.copy_advice(|| "input_b", &mut region, config.advice[1], 0)?;
 
-                // Now we can assign the multiplication result, which is to be assigned
+                // Now we can assign the xor result, which is to be assigned
                 // into the output position.
                 let a_v = a.0.value();
                 let b_v = b.0.value();
@@ -273,8 +257,8 @@ impl<F: FieldExt, const N:usize> XorInstructions<F> for XorChip<F,N> {
                 region
                     .assign_advice(
                         || "a_input ^ b_input",
-                        config.output_c,
-                        0,
+                        config.advice[0],
+                        1,
                         || value.ok_or(Error::Synthesis),
                     )
                     .map(Bits)
@@ -319,8 +303,8 @@ impl<F: FieldExt, const N:usize> Circuit<F> for MyCircuit<F,N> {
     }
 
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-        // We create the advice column that FieldChip uses for Input.
-        let advice = meta.advice_column();
+        // We create the advice column that XorChip uses for I/O.
+        let advice = [meta.advice_column(), meta.advice_column()];
 
         // We also need an instance column to store public inputs.
         let instance = meta.instance_column();
@@ -333,7 +317,7 @@ impl<F: FieldExt, const N:usize> Circuit<F> for MyCircuit<F,N> {
         config: Self::Config,
         mut layouter: impl Layouter<F>,
     ) -> Result<(), Error> {
-        XorChip::load(&config, &mut layouter);
+        XorChip::load(&config, &mut layouter)?;
         let xor_chip = XorChip::<F,N>::construct(config);
 
         let a_f = if let Some(a) = self.a {
@@ -363,7 +347,7 @@ impl<F:FieldExt, const N:usize> MyCircuit<F,N> {
     ) -> F {
         let mut f = F::zero();
         let mut pow = F::one();
-        for (i, b) in bits.iter().enumerate() {
+        for (_, b) in bits.iter().enumerate() {
             if *b {
                 f += pow;
             }
