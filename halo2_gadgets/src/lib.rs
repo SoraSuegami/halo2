@@ -9,5 +9,5 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
-#[cfg(featFure = "unstable")]
-pub mod sha256;
+mod sha256;
+pub use sha256::*;
