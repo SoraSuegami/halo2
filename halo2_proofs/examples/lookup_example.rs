@@ -9,10 +9,10 @@ use halo2_proofs::{
 
 // ANCHOR: instructions
 trait XorInstructions<F: FieldExt>: Chip<F> {
-    /// Variable representing a boolean vector.
+    /// Variable representing bits.
     type Bits;
 
-    /// Loads a boolean vector into the circuit as a private input.
+    /// Loads bits into the circuit as a private input.
     fn load_private(&self, layouter: impl Layouter<F>, a: Option<F>) -> Result<Self::Bits, Error>;
 
     /// Returns `c = a ^ b`.
@@ -23,7 +23,7 @@ trait XorInstructions<F: FieldExt>: Chip<F> {
         b: Self::Bits,
     ) -> Result<Self::Bits, Error>;
 
-    /// Exposes a boolean vector as a public input to the circuit.
+    /// Exposes bits as a public input to the circuit.
     fn expose_public(
         &self,
         layouter: impl Layouter<F>,
@@ -181,7 +181,7 @@ impl<F: FieldExt, const N: usize> XorConfig<F, N> {
 }
 
 // ANCHOR: instructions-impl
-/// A variable representing a boolean vector.
+/// A variable representing bits.
 #[derive(Clone)]
 struct Bits<F: FieldExt, const N: usize>(AssignedCell<F, F>);
 
@@ -372,7 +372,7 @@ fn main() {
         _f: PhantomData,
     };
 
-    // Arrange the public input. We expose the multiplication result in row 0
+    // Arrange the public input. We expose the XOR result in row 0
     // of the instance column, so we position it there in our public inputs.
     let mut public_inputs = vec![MyCircuit::bits2field(expected_c)];
 
